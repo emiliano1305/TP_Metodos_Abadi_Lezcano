@@ -1341,7 +1341,7 @@ if archivo is None:
 
     st.info(
         "Para comenzar, cargá el archivo "
-        "`01_Buenos_Aires_Castelar.csv` "
+        "`csv` "
         "desde el panel lateral."
     )
 
