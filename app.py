@@ -1,5 +1,8 @@
 
+from pathlib import Path
 import io
+import warnings
+
 import numpy as np
 import pandas as pd
 import scipy.stats as stats
@@ -7,33 +10,24 @@ import statsmodels.api as sm
 import streamlit as st
 import matplotlib.pyplot as plt
 import seaborn as sns
-
-from statsmodels.stats.diagnostic import (
-    het_breuschpagan,
-    acorr_ljungbox
-)
+from statsmodels.stats.diagnostic import het_breuschpagan, acorr_ljungbox
 from statsmodels.stats.stattools import durbin_watson
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 
-# ============================================================
-# CONFIGURACIÓN
-# ============================================================
-
 st.set_page_config(
-    page_title="Análisis estadístico - Abadi y Lezcano",
+    page_title="Trabajo práctico integrador | Métodos Estadísticos",
     page_icon="📊",
-    layout="wide"
+    layout="wide",
 )
 
 sns.set_theme(style="whitegrid")
-
 ALFA = 0.05
 
 VARIABLES = [
     "Temperatura_Abrigo_150cm",
     "Humedad_Media",
     "Presion_Media",
-    "Radiacion_Global"
+    "Radiacion_Global",
 ]
 
 DEPENDIENTE = "Radiacion_Global"
@@ -42,43 +36,55 @@ PREDICTOR_SIMPLE = "Temperatura_Abrigo_150cm"
 PREDICTORES_MULTIPLES = [
     "Temperatura_Abrigo_150cm",
     "Humedad_Media",
-    "Presion_Media"
+    "Presion_Media",
 ]
 
-# ============================================================
+ARCHIVO_EJEMPLO = "01_Buenos_Aires_Castelar.csv"
+
+
+# --------------------------------------------------
 # CARGA Y VALIDACIÓN DE DATOS
-# ============================================================
+# --------------------------------------------------
 
 def cargar_datos(archivo):
+    """Lee y valida el CSV utilizado en el trabajo."""
 
     contenido = archivo.getvalue()
 
     if not contenido:
-        raise ValueError("El archivo está vacío.")
+        raise ValueError("El archivo CSV está vacío.")
 
-    datos = pd.read_csv(
-        io.BytesIO(contenido),
-        sep=None,
-        engine="python"
-    )
+    try:
+        datos = pd.read_csv(io.BytesIO(contenido), sep=";")
+
+        if len(datos.columns) == 1:
+            datos = pd.read_csv(io.BytesIO(contenido), sep=",")
+
+    except Exception as exc:
+        raise ValueError(
+            "No se pudo interpretar el CSV. "
+            "Revisá el separador y los encabezados."
+        ) from exc
+
+    if datos.empty:
+        raise ValueError("El archivo CSV no contiene registros.")
 
     obligatorias = ["Fecha"] + VARIABLES
 
     faltantes = [
-        columna for columna in obligatorias
-        if columna not in datos.columns
+        c for c in obligatorias
+        if c not in datos.columns
     ]
 
     if faltantes:
         raise ValueError(
-            "Faltan columnas: " + ", ".join(faltantes)
+            "Faltan columnas obligatorias: "
+            + ", ".join(faltantes)
         )
 
     datos = datos[obligatorias].copy()
 
-    # CORRECCIÓN: interpretación de fechas ISO del CSV
-    # Ejemplo: 2023-08-10 00:00:00.0
-
+    # Conversión de fechas compatible con distintos formatos.
     datos["Fecha"] = pd.to_datetime(
         datos["Fecha"],
         errors="coerce",
@@ -105,18 +111,30 @@ def cargar_datos(archivo):
         )
 
     if datos[VARIABLES].isna().any().any():
-        raise ValueError(
-            "Hay valores faltantes o no numéricos."
+
+        columnas = (
+            datos[VARIABLES]
+            .columns[datos[VARIABLES].isna().any()]
+            .tolist()
         )
 
-    datos = datos.sort_values("Fecha").reset_index(drop=True)
+        raise ValueError(
+            "Hay valores faltantes o no numéricos en: "
+            + ", ".join(columnas)
+        )
+
+    datos = (
+        datos
+        .sort_values("Fecha")
+        .reset_index(drop=True)
+    )
 
     return datos
 
 
-# ============================================================
+# --------------------------------------------------
 # ESTADÍSTICA DESCRIPTIVA
-# ============================================================
+# --------------------------------------------------
 
 def tabla_descriptiva(datos):
 
@@ -126,7 +144,6 @@ def tabla_descriptiva(datos):
     tabla["mediana"] = datos[VARIABLES].median()
     tabla["Q1"] = datos[VARIABLES].quantile(0.25)
     tabla["Q3"] = datos[VARIABLES].quantile(0.75)
-
     tabla["IQR"] = tabla["Q3"] - tabla["Q1"]
 
     tabla["CV_%"] = (
@@ -135,14 +152,14 @@ def tabla_descriptiva(datos):
     ) * 100
 
     tabla["asimetria"] = datos[VARIABLES].skew()
-    tabla["curtosis"] = datos[VARIABLES].kurt()
+    tabla["curtosis_exceso"] = datos[VARIABLES].kurt()
 
     return tabla
 
 
-# ============================================================
+# --------------------------------------------------
 # MODELOS DE REGRESIÓN
-# ============================================================
+# --------------------------------------------------
 
 def ajustar_modelos(datos):
 
@@ -152,20 +169,35 @@ def ajustar_modelos(datos):
         datos[[PREDICTOR_SIMPLE]]
     )
 
-    modelo_simple = sm.OLS(y, X_simple).fit()
+    modelo_simple = sm.OLS(
+        y,
+        X_simple
+    ).fit()
 
     X_multiple = sm.add_constant(
         datos[PREDICTORES_MULTIPLES]
     )
 
-    modelo_multiple = sm.OLS(y, X_multiple).fit()
+    modelo_multiple = sm.OLS(
+        y,
+        X_multiple
+    ).fit()
 
     return modelo_simple, modelo_multiple
 
 
-# ============================================================
-# PRUEBAS ESTADÍSTICAS DE RESIDUOS
-# ============================================================
+def interpretar_pvalor(p, alfa=ALFA):
+
+    return (
+        "Se rechaza H₀"
+        if p < alfa
+        else "No se rechaza H₀"
+    )
+
+
+# --------------------------------------------------
+# PRUEBAS Y DIAGNÓSTICO DE RESIDUOS
+# --------------------------------------------------
 
 def mostrar_pruebas_residuos(modelo, nombre):
 
@@ -174,9 +206,7 @@ def mostrar_pruebas_residuos(modelo, nombre):
 
     shapiro = stats.shapiro(residuos)
     jb = stats.jarque_bera(residuos)
-
     bp = het_breuschpagan(residuos, exog)
-
     dw = durbin_watson(residuos)
 
     lb = acorr_ljungbox(
@@ -188,46 +218,51 @@ def mostrar_pruebas_residuos(modelo, nombre):
     resultados = pd.DataFrame([
         [
             "Shapiro-Wilk",
-            shapiro.statistic,
-            shapiro.pvalue
+            f"{shapiro.statistic:.4f}",
+            shapiro.pvalue,
+            interpretar_pvalor(shapiro.pvalue)
         ],
         [
             "Jarque-Bera",
-            jb.statistic,
-            jb.pvalue
+            f"{jb.statistic:.4f}",
+            jb.pvalue,
+            interpretar_pvalor(jb.pvalue)
         ],
         [
             "Breusch-Pagan",
-            bp[0],
-            bp[1]
+            f"{bp[0]:.4f}",
+            bp[1],
+            interpretar_pvalor(bp[1])
         ],
         [
             "Durbin-Watson",
-            dw,
-            np.nan
+            f"{dw:.4f}",
+            np.nan,
+            "Valor de referencia cercano a 2"
         ],
         [
             "Ljung-Box (rezago 10)",
-            lb["lb_stat"].iloc[0],
-            lb["lb_pvalue"].iloc[0]
-        ]
+            f"{lb['lb_stat'].iloc[0]:.4f}",
+            lb["lb_pvalue"].iloc[0],
+            interpretar_pvalor(lb["lb_pvalue"].iloc[0])
+        ],
     ], columns=[
         "Prueba",
         "Estadístico",
-        "p-valor"
+        "p-valor",
+        "Interpretación"
     ])
 
-    st.subheader(f"Pruebas de residuos: {nombre}")
+    st.subheader(f"Pruebas de residuos — {nombre}")
 
     st.dataframe(
-        resultados.round(5),
-        use_container_width=True
+        resultados,
+        use_container_width=True,
+        hide_index=True
     )
 
+    return resultados
 
-# ============================================================
-# GRÁFICOS DE RESIDUOS
-# ============================================================
 
 def grafico_residuos(modelo, nombre):
 
@@ -255,6 +290,9 @@ def grafico_residuos(modelo, nombre):
         "Residuos vs. valores ajustados"
     )
 
+    ejes[0, 0].set_xlabel("Valores ajustados")
+    ejes[0, 0].set_ylabel("Residuos")
+
     sm.qqplot(
         residuos,
         line="45",
@@ -263,7 +301,11 @@ def grafico_residuos(modelo, nombre):
 
     ejes[0, 1].set_title("Gráfico Q-Q")
 
-    ejes[1, 0].plot(residuos.values)
+    ejes[1, 0].plot(
+        residuos.index,
+        residuos,
+        alpha=0.75
+    )
 
     ejes[1, 0].axhline(
         0,
@@ -271,9 +313,9 @@ def grafico_residuos(modelo, nombre):
         linestyle="--"
     )
 
-    ejes[1, 0].set_title(
-        "Residuos por observación"
-    )
+    ejes[1, 0].set_title("Residuos en el tiempo")
+    ejes[1, 0].set_xlabel("Observación")
+    ejes[1, 0].set_ylabel("Residuo")
 
     sns.histplot(
         residuos,
@@ -282,21 +324,30 @@ def grafico_residuos(modelo, nombre):
     )
 
     ejes[1, 1].set_title(
-        "Distribución de residuos"
+        "Distribución de los residuos"
     )
 
-    fig.suptitle(nombre)
+    fig.suptitle(
+        f"Diagnóstico de residuos — {nombre}",
+        fontsize=14
+    )
 
     fig.tight_layout()
 
     st.pyplot(fig)
-
     plt.close(fig)
 
 
-# ============================================================
+def mostrar_resumen_modelo(modelo):
+
+    st.text(
+        modelo.summary().as_text()
+    )
+
+
+# --------------------------------------------------
 # 1. ANÁLISIS ESTRUCTURAL
-# ============================================================
+# --------------------------------------------------
 
 def mostrar_datos(datos):
 
@@ -304,8 +355,15 @@ def mostrar_datos(datos):
 
     c1, c2, c3, c4 = st.columns(4)
 
-    c1.metric("Observaciones", len(datos))
-    c2.metric("Variables", len(datos.columns))
+    c1.metric(
+        "Registros",
+        f"{len(datos):,}".replace(",", ".")
+    )
+
+    c2.metric(
+        "Variables",
+        len(datos.columns)
+    )
 
     c3.metric(
         "Valores faltantes",
@@ -318,8 +376,23 @@ def mostrar_datos(datos):
     )
 
     st.write(
-        f"Período: {datos['Fecha'].min().date()} "
-        f"al {datos['Fecha'].max().date()}"
+        f"**Período:** "
+        f"{datos['Fecha'].min().date()} al "
+        f"{datos['Fecha'].max().date()}"
+    )
+
+    diferencias = (
+        datos["Fecha"]
+        .diff()
+        .dt.days
+        .dropna()
+    )
+
+    st.write(
+        f"**Intervalos de un día:** "
+        f"{(diferencias == 1).sum()} · "
+        f"**Otros intervalos:** "
+        f"{(diferencias != 1).sum()}"
     )
 
     st.subheader("Vista de los datos")
@@ -329,10 +402,23 @@ def mostrar_datos(datos):
         use_container_width=True
     )
 
+    st.subheader("Tipos de variables")
 
-# ============================================================
+    tipos = pd.DataFrame({
+        "Variable": datos.dtypes.index,
+        "Tipo": datos.dtypes.astype(str).values
+    })
+
+    st.dataframe(
+        tipos,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# --------------------------------------------------
 # 2. DESCRIPCIÓN NUMÉRICA
-# ============================================================
+# --------------------------------------------------
 
 def mostrar_descriptiva(datos):
 
@@ -340,34 +426,64 @@ def mostrar_descriptiva(datos):
 
     tabla = tabla_descriptiva(datos)
 
+    columnas = [
+        "count",
+        "mean",
+        "mediana",
+        "std",
+        "varianza",
+        "min",
+        "Q1",
+        "50%",
+        "Q3",
+        "max",
+        "IQR",
+        "CV_%",
+        "asimetria",
+        "curtosis_exceso"
+    ]
+
     st.dataframe(
-        tabla.round(4),
+        tabla[columnas].round(4),
         use_container_width=True
     )
 
-    st.subheader("Valores atípicos")
+    mayor = tabla["CV_%"].idxmax()
+    menor = tabla["CV_%"].idxmin()
+
+    st.info(
+        f"Mayor variabilidad relativa: **{mayor}**. "
+        f"Menor variabilidad relativa: **{menor}**."
+    )
+
+    st.subheader(
+        "Valores atípicos — criterio de Tukey"
+    )
 
     filas = []
 
     for variable in VARIABLES:
 
-        q1 = datos[variable].quantile(0.25)
-        q3 = datos[variable].quantile(0.75)
+        q1, q3 = datos[variable].quantile(
+            [0.25, 0.75]
+        )
 
         iqr = q3 - q1
 
-        inferior = q1 - 1.5 * iqr
-        superior = q3 + 1.5 * iqr
+        li = q1 - 1.5 * iqr
+        ls = q3 + 1.5 * iqr
 
-        cantidad = (
-            (datos[variable] < inferior)
-            | (datos[variable] > superior)
-        ).sum()
+        cantidad = int(
+            (
+                (datos[variable] < li)
+                | (datos[variable] > ls)
+            ).sum()
+        )
 
         filas.append([
             variable,
-            inferior,
-            superior,
+            li,
+            ls,
             cantidad
         ])
 
@@ -378,15 +494,18 @@ def mostrar_descriptiva(datos):
                 "Variable",
                 "Límite inferior",
                 "Límite superior",
-                "Atípicos"
+                "Cantidad de atípicos"
             ]
-        ),
-        use_container_width=True
+        ).round(3),
+        use_container_width=True,
+        hide_index=True
     )
 
-    st.subheader("Normalidad de las variables")
+    st.subheader(
+        "Pruebas de normalidad de las variables"
+    )
 
-    resultados = []
+    norm = []
 
     for variable in VARIABLES:
 
@@ -394,28 +513,31 @@ def mostrar_descriptiva(datos):
             datos[variable]
         )
 
-        resultados.append([
+        norm.append([
             variable,
             resultado.statistic,
-            resultado.pvalue
+            resultado.pvalue,
+            interpretar_pvalor(resultado.pvalue)
         ])
 
     st.dataframe(
         pd.DataFrame(
-            resultados,
+            norm,
             columns=[
                 "Variable",
                 "W",
-                "p-valor"
+                "p-valor",
+                "Interpretación"
             ]
-        ),
-        use_container_width=True
+        ).round(6),
+        use_container_width=True,
+        hide_index=True
     )
 
 
-# ============================================================
+# --------------------------------------------------
 # 3. DESCRIPCIÓN GRÁFICA
-# ============================================================
+# --------------------------------------------------
 
 def mostrar_graficos(datos):
 
@@ -423,72 +545,98 @@ def mostrar_graficos(datos):
 
     for variable in VARIABLES:
 
-        with st.expander(variable):
+        with st.expander(
+            variable,
+            expanded=(variable == DEPENDIENTE)
+        ):
 
             fig, ejes = plt.subplots(
                 1, 2,
-                figsize=(11, 4)
+                figsize=(11, 3.5)
             )
 
             sns.histplot(
                 datos[variable],
                 kde=True,
-                ax=ejes[0]
+                ax=ejes[0],
+                color="skyblue"
             )
 
-            ejes[0].set_title("Histograma")
+            ejes[0].set_title(
+                f"Distribución de {variable}"
+            )
 
             sns.boxplot(
                 x=datos[variable],
-                ax=ejes[1]
+                ax=ejes[1],
+                color="lightgreen"
             )
 
-            ejes[1].set_title("Diagrama de caja")
+            ejes[1].set_title(
+                "Diagrama de caja"
+            )
+
+            fig.tight_layout()
 
             st.pyplot(fig)
-
             plt.close(fig)
 
 
-# ============================================================
+# --------------------------------------------------
 # 4. SERIES TEMPORALES
-# ============================================================
+# --------------------------------------------------
 
 def mostrar_temporales(datos):
 
     st.title("4. Series temporales")
 
     seleccion = st.multiselect(
-        "Seleccionar variables",
+        "Variables para visualizar",
         VARIABLES,
         default=VARIABLES
     )
 
     if not seleccion:
-        st.warning("Seleccioná alguna variable.")
-        return
 
-    for variable in seleccion:
-
-        fig, ax = plt.subplots(figsize=(12, 3))
-
-        ax.plot(
-            datos["Fecha"],
-            datos[variable]
+        st.warning(
+            "Seleccioná al menos una variable."
         )
 
-        ax.set_title(variable)
+        return
 
-        ax.set_xlabel("Fecha")
+    fig, ejes = plt.subplots(
+        len(seleccion),
+        1,
+        figsize=(12, max(3, 2.7 * len(seleccion))),
+        sharex=True,
+        squeeze=False
+    )
 
-        st.pyplot(fig)
+    for eje, variable in zip(
+        ejes[:, 0],
+        seleccion
+    ):
 
-        plt.close(fig)
+        eje.plot(
+            datos["Fecha"],
+            datos[variable],
+            linewidth=0.8
+        )
+
+        eje.set_title(variable)
+        eje.set_ylabel("Valor")
+
+    ejes[-1, 0].set_xlabel("Fecha")
+
+    fig.tight_layout()
+
+    st.pyplot(fig)
+    plt.close(fig)
 
 
-# ============================================================
-# 5. CORRELACIONES
-# ============================================================
+# --------------------------------------------------
+# 5. MATRIZ DE CORRELACIÓN
+# --------------------------------------------------
 
 def mostrar_correlaciones(datos):
 
@@ -496,7 +644,9 @@ def mostrar_correlaciones(datos):
 
     matriz = datos[VARIABLES].corr()
 
-    fig, ax = plt.subplots(figsize=(7, 5))
+    fig, ax = plt.subplots(
+        figsize=(7, 5)
+    )
 
     sns.heatmap(
         matriz,
@@ -504,134 +654,183 @@ def mostrar_correlaciones(datos):
         cmap="coolwarm",
         vmin=-1,
         vmax=1,
+        center=0,
+        fmt=".2f",
         ax=ax
     )
 
     st.pyplot(fig)
-
     plt.close(fig)
 
-    st.subheader(
-        "Correlaciones con radiación global"
+    st.dataframe(
+        matriz.round(4),
+        use_container_width=True
     )
 
-    correlaciones = (
+    correl = (
         matriz[DEPENDIENTE]
         .drop(DEPENDIENTE)
         .sort_values()
     )
 
-    st.dataframe(correlaciones)
+    st.subheader(
+        "Correlaciones con Radiacion_Global"
+    )
+
+    st.dataframe(
+        correl.rename(
+            "Correlación de Pearson"
+        ).to_frame(),
+        use_container_width=True
+    )
+
+    fig, ax = plt.subplots(
+        figsize=(7, 4.5)
+    )
+
+    sns.regplot(
+        data=datos,
+        x=PREDICTOR_SIMPLE,
+        y=DEPENDIENTE,
+        scatter_kws={"alpha": 0.45},
+        ax=ax
+    )
+
+    ax.set_title(
+        "Relación entre temperatura y radiación global"
+    )
+
+    st.pyplot(fig)
+    plt.close(fig)
 
 
-# ============================================================
+# --------------------------------------------------
 # 6. CONCLUSIÓN DESCRIPTIVA
-# ============================================================
+# --------------------------------------------------
 
 def mostrar_conclusion_descriptiva(datos):
 
-    st.title("6. Conclusión descriptiva")
-
     tabla = tabla_descriptiva(datos)
 
-    correlaciones = (
+    correl = (
         datos[VARIABLES]
         .corr()[DEPENDIENTE]
         .drop(DEPENDIENTE)
     )
 
+    st.title(
+        "6. Conclusión de estadística descriptiva"
+    )
+
     st.write(
-        f"La base contiene {len(datos)} observaciones."
+        f"La base contiene **{len(datos)} observaciones**, "
+        f"desde **{datos['Fecha'].min().date()}** "
+        f"hasta **{datos['Fecha'].max().date()}**."
     )
 
     st.write(
         f"La variable con mayor variabilidad relativa "
-        f"es {tabla['CV_%'].idxmax()}."
+        f"(CV) es **{tabla['CV_%'].idxmax()}**; "
+        f"la de menor variabilidad relativa es "
+        f"**{tabla['CV_%'].idxmin()}**."
     )
 
     st.write(
-        f"La variable con menor variabilidad relativa "
-        f"es {tabla['CV_%'].idxmin()}."
+        "Correlaciones con Radiacion_Global:"
     )
 
     st.dataframe(
-        correlaciones.sort_values().to_frame(
-            "Correlación de Pearson"
-        )
+        correl.sort_values().rename("r").to_frame(),
+        use_container_width=True
     )
 
 
-# ============================================================
-# 7. REGRESIÓN SIMPLE
-# ============================================================
+# --------------------------------------------------
+# 7. REGRESIÓN LINEAL SIMPLE
+# --------------------------------------------------
 
 def mostrar_regresion_simple(modelo):
 
     st.title("7. Regresión lineal simple")
 
     b0 = modelo.params["const"]
-
     b1 = modelo.params[PREDICTOR_SIMPLE]
+
+    st.latex(
+        r"\widehat{Radiacion\_Global} = "
+        r"\beta_0 + \beta_1 \cdot Temperatura"
+    )
 
     c1, c2, c3 = st.columns(3)
 
     c1.metric("Intercepto", f"{b0:.4f}")
-
     c2.metric("Pendiente", f"{b1:.4f}")
-
     c3.metric("R²", f"{modelo.rsquared:.4f}")
 
     st.write(
+        f"**Ecuación estimada:** "
         f"Radiacion_Global = {b0:.4f} + "
         f"({b1:.4f} × Temperatura_Abrigo_150cm)"
     )
 
     st.write(
         f"El modelo explica el "
-        f"{modelo.rsquared * 100:.2f}% "
+        f"**{modelo.rsquared * 100:.2f}%** "
         f"de la variabilidad de la radiación global."
     )
 
-    st.text(modelo.summary().as_text())
+    st.subheader("Resumen estadístico")
 
-    fig, ax = plt.subplots(figsize=(8, 4))
+    mostrar_resumen_modelo(modelo)
 
-    x = modelo.model.exog[:, 1]
+    st.subheader("Recta de regresión")
 
-    ax.scatter(
-        x,
-        modelo.model.endog,
-        alpha=0.5
+    fig, ax = plt.subplots(
+        figsize=(8, 4.5)
     )
 
-    orden = np.argsort(x)
+    ax.scatter(
+        modelo.model.exog[:, 1],
+        modelo.model.endog,
+        alpha=0.45
+    )
+
+    orden = np.argsort(
+        modelo.model.exog[:, 1]
+    )
 
     ax.plot(
-        x[orden],
+        modelo.model.exog[orden, 1],
         modelo.fittedvalues.iloc[orden],
         color="red"
     )
 
     ax.set_xlabel(PREDICTOR_SIMPLE)
-
     ax.set_ylabel(DEPENDIENTE)
 
     st.pyplot(fig)
-
     plt.close(fig)
 
 
-# ============================================================
-# 8. RESIDUOS
-# ============================================================
+# --------------------------------------------------
+# 8. RESIDUOS DEL MODELO SIMPLE
+# --------------------------------------------------
 
 def mostrar_residuos_simple(modelo):
 
-    st.title("8. Análisis de residuos")
+    st.title(
+        "8. Análisis de residuos del modelo simple"
+    )
+
+    st.write(
+        "Se evalúan normalidad, homocedasticidad "
+        "e independencia de los errores mediante "
+        "pruebas estadísticas y gráficos de diagnóstico."
+    )
 
     mostrar_pruebas_residuos(
         modelo,
-        "Regresión simple"
+        "Regresión lineal simple"
     )
 
     grafico_residuos(
@@ -640,20 +839,19 @@ def mostrar_residuos_simple(modelo):
     )
 
 
-# ============================================================
-# 9. TEST DE HIPÓTESIS
-# ============================================================
+# --------------------------------------------------
+# 9. TEST DE HIPÓTESIS SOBRE LA PENDIENTE
+# --------------------------------------------------
 
 def mostrar_test_pendiente(modelo):
 
-    st.title("9. Test de hipótesis sobre la pendiente")
+    st.title(
+        "9. Test de hipótesis sobre la pendiente"
+    )
 
     beta = modelo.params[PREDICTOR_SIMPLE]
-
     error = modelo.bse[PREDICTOR_SIMPLE]
-
     t_obs = modelo.tvalues[PREDICTOR_SIMPLE]
-
     p_valor = modelo.pvalues[PREDICTOR_SIMPLE]
 
     gl = int(modelo.df_resid)
@@ -663,158 +861,234 @@ def mostrar_test_pendiente(modelo):
         gl
     )
 
-    ic = modelo.conf_int(alpha=ALFA).loc[
-        PREDICTOR_SIMPLE
-    ]
+    ic_inf, ic_sup = (
+        modelo.conf_int(alpha=ALFA)
+        .loc[PREDICTOR_SIMPLE]
+    )
 
-    st.markdown("""
-    **Hipótesis nula:** H₀: β₁ = 0
+    st.markdown(
+        f"- **H₀:** β₁ = 0\n"
+        f"- **H₁:** β₁ ≠ 0\n"
+        f"- **Nivel de significación:** α = {ALFA}\n"
+        f"- **Grados de libertad:** {gl}"
+    )
 
-    **Hipótesis alternativa:** H₁: β₁ ≠ 0
+    a, b, c, d = st.columns(4)
 
-    **Nivel de significación:** α = 0,05
-    """)
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric("Pendiente", f"{beta:.5f}")
-
-    c2.metric("Error estándar", f"{error:.5f}")
-
-    c3.metric("t observado", f"{t_obs:.4f}")
-
-    c4.metric("p-valor", f"{p_valor:.5g}")
+    a.metric("Pendiente", f"{beta:.6f}")
+    b.metric("Error estándar", f"{error:.6f}")
+    c.metric("t observado", f"{t_obs:.4f}")
+    d.metric("p-valor", f"{p_valor:.4g}")
 
     st.write(
-        f"Valor crítico: ±{t_critico:.4f}"
+        f"Valor crítico bilateral: ±{t_critico:.4f}"
     )
 
     st.write(
-        f"Intervalo de confianza: "
-        f"[{ic.iloc[0]:.4f}, {ic.iloc[1]:.4f}]"
+        f"Intervalo de confianza del 95%: "
+        f"[{ic_inf:.4f}, {ic_sup:.4f}]"
     )
 
     if p_valor < ALFA:
 
         st.success(
-            "Se rechaza H₀. Existe evidencia estadística "
-            "de una relación lineal."
+            "Se rechaza H₀: existe evidencia estadística "
+            "de una relación lineal entre temperatura "
+            "y radiación global."
         )
 
     else:
 
         st.info(
-            "No se rechaza H₀. No existe evidencia "
-            "estadística suficiente."
+            "No se rechaza H₀: no hay evidencia estadística "
+            "suficiente para afirmar una relación lineal."
         )
 
+    xs = np.linspace(
+        -max(5, abs(t_obs) + 1),
+        max(5, abs(t_obs) + 1),
+        500
+    )
 
-# ============================================================
+    fig, ax = plt.subplots(
+        figsize=(8, 3)
+    )
+
+    ax.plot(
+        xs,
+        stats.t.pdf(xs, gl)
+    )
+
+    ax.fill_between(
+        xs,
+        stats.t.pdf(xs, gl),
+        where=np.abs(xs) >= t_critico,
+        alpha=0.3,
+        color="red"
+    )
+
+    ax.axvline(
+        t_obs,
+        color="blue",
+        linestyle="--",
+        label=f"t observado = {t_obs:.2f}"
+    )
+
+    ax.set_title(
+        "Distribución t bajo H₀"
+    )
+
+    ax.legend()
+
+    st.pyplot(fig)
+    plt.close(fig)
+
+
+# --------------------------------------------------
 # 10. ERRORES ROBUSTOS NEWEY-WEST
-# ============================================================
+# --------------------------------------------------
 
 def mostrar_newey_west(modelo):
 
-    st.title("10. Errores robustos Newey-West")
-
-    maxlags = min(
-        10,
-        int(modelo.nobs) - 1
+    st.title(
+        "10. Supuestos y errores robustos Newey-West"
     )
+
+    n = int(modelo.nobs)
+    maxlags = min(10, n - 1)
 
     robusto = modelo.get_robustcov_results(
         cov_type="HAC",
         maxlags=maxlags
     )
 
-    indice = list(modelo.params.index).index(
-        PREDICTOR_SIMPLE
-    )
+    indice = list(
+        modelo.params.index
+    ).index(PREDICTOR_SIMPLE)
+
+    beta = modelo.params[PREDICTOR_SIMPLE]
+    se = robusto.bse[indice]
+    t = robusto.tvalues[indice]
+    p = robusto.pvalues[indice]
+
+    ic = robusto.conf_int(
+        alpha=ALFA
+    )[indice]
 
     st.write(
-        f"Rezagos HAC utilizados: {maxlags}"
+        f"Rezagos HAC utilizados: **{maxlags}**"
     )
 
-    resultados = pd.DataFrame({
-        "Indicador": [
-            "Pendiente",
-            "Error estándar robusto",
-            "Estadístico t",
-            "p-valor"
-        ],
-        "Resultado": [
-            modelo.params[PREDICTOR_SIMPLE],
-            robusto.bse[indice],
-            robusto.tvalues[indice],
-            robusto.pvalues[indice]
-        ]
-    })
+    st.dataframe(
+        pd.DataFrame({
+            "Indicador": [
+                "Pendiente",
+                "Error estándar HAC",
+                "t robusto HAC",
+                "p-valor robusto HAC",
+                "IC 95% inferior",
+                "IC 95% superior"
+            ],
+            "Resultado": [
+                f"{beta:.6f}",
+                f"{se:.6f}",
+                f"{t:.4f}",
+                f"{p:.6g}",
+                f"{ic[0]:.4f}",
+                f"{ic[1]:.4f}"
+            ],
+        }),
+        use_container_width=True,
+        hide_index=True
+    )
 
-    st.dataframe(resultados)
-
-    if robusto.pvalues[indice] < ALFA:
+    if p < ALFA:
 
         st.success(
-            "La pendiente continúa siendo significativa "
-            "con errores robustos."
+            "Con errores estándar robustos, "
+            "la pendiente continúa siendo "
+            "estadísticamente significativa."
         )
 
     else:
 
         st.warning(
-            "La pendiente no resulta significativa "
-            "con errores robustos."
+            "Con errores estándar robustos, "
+            "la pendiente no resulta estadísticamente significativa."
         )
 
 
-# ============================================================
-# 11. REGRESIÓN MÚLTIPLE
-# ============================================================
+# --------------------------------------------------
+# 11. REGRESIÓN LINEAL MÚLTIPLE
+# --------------------------------------------------
 
-def mostrar_multiple(modelo_simple, modelo_multiple):
+def mostrar_multiple(
+    modelo_simple,
+    modelo_multiple,
+    datos
+):
 
-    st.title("11. Regresión lineal múltiple")
+    st.title(
+        "11. Regresión lineal múltiple"
+    )
 
     c1, c2, c3, c4 = st.columns(4)
 
-    c1.metric("R²", f"{modelo_multiple.rsquared:.4f}")
+    c1.metric(
+        "R²",
+        f"{modelo_multiple.rsquared:.4f}"
+    )
 
     c2.metric(
         "R² ajustado",
         f"{modelo_multiple.rsquared_adj:.4f}"
     )
 
-    c3.metric("AIC", f"{modelo_multiple.aic:.2f}")
+    c3.metric(
+        "AIC",
+        f"{modelo_multiple.aic:.2f}"
+    )
 
     c4.metric(
         "p-valor F",
-        f"{modelo_multiple.f_pvalue:.5g}"
+        f"{modelo_multiple.f_pvalue:.3g}"
     )
 
-    st.subheader("Coeficientes")
+    st.subheader(
+        "Ecuación y coeficientes"
+    )
 
-    tabla = pd.DataFrame({
-        "Coeficiente": modelo_multiple.params,
-        "Error estándar": modelo_multiple.bse,
-        "t": modelo_multiple.tvalues,
-        "p-valor": modelo_multiple.pvalues
-    })
+    st.write(
+        "**Variable dependiente:** Radiacion_Global"
+    )
 
-    st.dataframe(tabla.round(5))
+    st.dataframe(
+        pd.DataFrame({
+            "Coeficiente": modelo_multiple.params,
+            "Error estándar": modelo_multiple.bse,
+            "t": modelo_multiple.tvalues,
+            "p-valor": modelo_multiple.pvalues,
+        }).round(5),
+        use_container_width=True
+    )
 
-    st.text(
-        modelo_multiple.summary().as_text()
+    mostrar_resumen_modelo(
+        modelo_multiple
+    )
+
+    st.subheader(
+        "Diagnóstico gráfico"
     )
 
     grafico_residuos(
         modelo_multiple,
-        "Regresión múltiple"
+        "Regresión lineal múltiple"
     )
 
 
-# ============================================================
+# --------------------------------------------------
 # 12. DIAGNÓSTICO Y COMPARACIÓN
-# ============================================================
+# --------------------------------------------------
 
 def mostrar_diagnostico_multiple(
     modelo_simple,
@@ -822,14 +1096,18 @@ def mostrar_diagnostico_multiple(
     datos
 ):
 
-    st.title("12. Diagnóstico y comparación de modelos")
+    st.title(
+        "12. Diagnóstico del modelo múltiple y comparación"
+    )
 
     mostrar_pruebas_residuos(
         modelo_multiple,
-        "Regresión múltiple"
+        "Regresión lineal múltiple"
     )
 
-    st.subheader("Multicolinealidad: VIF")
+    st.subheader(
+        "Factor de inflación de la varianza (VIF)"
+    )
 
     X = sm.add_constant(
         datos[PREDICTORES_MULTIPLES]
@@ -849,46 +1127,62 @@ def mostrar_diagnostico_multiple(
                 )
             ])
 
+    vif_df = pd.DataFrame(
+        vif,
+        columns=["Variable", "VIF"]
+    )
+
     st.dataframe(
-        pd.DataFrame(
-            vif,
-            columns=["Variable", "VIF"]
+        vif_df.round(4),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.subheader(
+        "Comparación de modelos"
+    )
+
+    comparacion = (
+        modelo_multiple.compare_f_test(
+            modelo_simple
         )
     )
 
-    st.subheader("Comparación de modelos")
-
-    comparacion = pd.DataFrame({
-        "Indicador": ["R²", "AIC", "BIC"],
-        "Modelo simple": [
+    resumen = pd.DataFrame([
+        [
+            "R²",
             modelo_simple.rsquared,
-            modelo_simple.aic,
-            modelo_simple.bic
+            modelo_multiple.rsquared
         ],
-        "Modelo múltiple": [
-            modelo_multiple.rsquared,
-            modelo_multiple.aic,
+        [
+            "AIC",
+            modelo_simple.aic,
+            modelo_multiple.aic
+        ],
+        [
+            "BIC",
+            modelo_simple.bic,
             modelo_multiple.bic
-        ]
-    })
+        ],
+    ], columns=[
+        "Indicador",
+        "Modelo simple",
+        "Modelo múltiple"
+    ])
 
     st.dataframe(
-        comparacion.round(4)
-    )
-
-    resultado = modelo_multiple.compare_f_test(
-        modelo_simple
-    )
-
-    st.write(
-        f"Test F parcial: F = {resultado[0]:.4f}"
+        resumen.round(4),
+        use_container_width=True,
+        hide_index=True
     )
 
     st.write(
-        f"p-valor = {resultado[1]:.6g}"
+        f"**Test F parcial (múltiple vs. simple):** "
+        f"F = {comparacion[0]:.4f} · "
+        f"p-valor = {comparacion[1]:.6g}"
     )
 
-    if resultado[1] < ALFA:
+    if comparacion[1] < ALFA:
 
         st.success(
             "El modelo múltiple mejora significativamente "
@@ -899,13 +1193,14 @@ def mostrar_diagnostico_multiple(
 
         st.info(
             "No se observa una mejora estadísticamente "
-            "significativa."
+            "significativa del modelo múltiple "
+            "respecto del simple."
         )
 
 
-# ============================================================
-# 13. CONCLUSIONES
-# ============================================================
+# --------------------------------------------------
+# 13. CONCLUSIONES GENERALES
+# --------------------------------------------------
 
 def mostrar_conclusiones(
     datos,
@@ -913,7 +1208,14 @@ def mostrar_conclusiones(
     modelo_multiple
 ):
 
-    st.title("13. Conclusiones generales")
+    st.title(
+        "13. Conclusiones generales"
+    )
+
+    mejora = (
+        modelo_multiple.rsquared
+        - modelo_simple.rsquared
+    ) * 100
 
     c1, c2, c3 = st.columns(3)
 
@@ -923,61 +1225,92 @@ def mostrar_conclusiones(
     )
 
     c2.metric(
-        "R² simple",
+        "R² modelo simple",
         f"{modelo_simple.rsquared:.4f}"
     )
 
     c3.metric(
-        "R² múltiple",
+        "R² modelo múltiple",
         f"{modelo_multiple.rsquared:.4f}"
     )
 
-    mejora = (
-        modelo_multiple.rsquared
-        - modelo_simple.rsquared
-    ) * 100
-
     st.write(
         f"El modelo simple explica el "
-        f"{modelo_simple.rsquared * 100:.2f}% "
+        f"**{modelo_simple.rsquared * 100:.2f}%** "
         f"de la variabilidad de la radiación global."
     )
 
     st.write(
         f"El modelo múltiple explica el "
-        f"{modelo_multiple.rsquared * 100:.2f}%."
+        f"**{modelo_multiple.rsquared * 100:.2f}%** "
+        f"de la variabilidad."
     )
 
     st.write(
-        f"La mejora del modelo múltiple es de "
-        f"{mejora:.2f} puntos porcentuales."
+        f"La ganancia de explicación del modelo múltiple "
+        f"es de **{mejora:.2f} puntos porcentuales**."
     )
 
-    st.info(
+    st.caption(
         "La asociación estadística no implica necesariamente "
-        "causalidad. Las conclusiones deben interpretarse "
-        "considerando los diagnósticos de residuos."
+        "causalidad. Las conclusiones inferenciales deben "
+        "interpretarse considerando los diagnósticos de residuos."
     )
 
 
-# ============================================================
-# INTERFAZ PRINCIPAL
-# ============================================================
+# ==================================================
+# INTERFAZ PRINCIPAL DE LA APLICACIÓN
+# ==================================================
 
-st.title("📊 Trabajo práctico integrador")
+# LOGO: guardá la imagen como logo.png junto a app.py.
 
-st.subheader(
-    "Métodos Estadísticos para Inteligencia Artificial"
+logo_path = Path(__file__).with_name("logo.png")
+
+col_logo, col_encabezado = st.columns(
+    [1, 5],
+    vertical_alignment="center"
 )
 
-st.caption(
-    "Abadi y Lezcano | Estación meteorológica Castelar"
-)
+with col_logo:
+
+    if logo_path.exists():
+
+        st.image(
+            str(logo_path),
+            width=130
+        )
+
+    else:
+
+        st.markdown("# 📊")
+
+
+with col_encabezado:
+
+    st.title(
+        "Trabajo práctico integrador"
+    )
+
+    st.subheader(
+        "Métodos Estadísticos para Inteligencia Artificial"
+    )
+
+    st.caption(
+        "Estación meteorológica Castelar · "
+        "Buenos Aires · Abadi y Lezcano"
+    )
+
 
 st.markdown(
-    "Aplicación interactiva para analizar los datos "
-    "meteorológicos de la estación Castelar."
+    "Aplicación interactiva basada en el trabajo práctico de "
+    "Abadi y Lezcano. Cargá la base meteorológica en formato "
+    "CSV para recorrer los análisis."
 )
+
+
+# --------------------------------------------------
+# PANEL LATERAL
+# --------------------------------------------------
 
 with st.sidebar:
 
@@ -989,31 +1322,35 @@ with st.sidebar:
     )
 
     st.caption(
-        "La base debe contener Fecha y las cuatro "
+        "El archivo debe contener Fecha y las cuatro "
         "variables del trabajo."
     )
 
     st.divider()
 
-    st.caption("Nivel de significación: α = 0,05")
+    st.caption(
+        "Nivel de significación utilizado: α = 0,05"
+    )
 
+
+# --------------------------------------------------
+# VALIDACIÓN DE LA BASE
+# --------------------------------------------------
 
 if archivo is None:
 
     st.info(
         "Para comenzar, cargá el archivo "
-        "01_Buenos_Aires_Castelar.csv."
+        "`01_Buenos_Aires_Castelar.csv` "
+        "desde el panel lateral."
     )
 
-    st.markdown("""
-    **Columnas requeridas:**
-
-    - Fecha
-    - Temperatura_Abrigo_150cm
-    - Humedad_Media
-    - Presion_Media
-    - Radiacion_Global
-    """)
+    st.markdown(
+        "**Columnas requeridas:** `Fecha`, "
+        "`Temperatura_Abrigo_150cm`, "
+        "`Humedad_Media`, `Presion_Media` "
+        "y `Radiacion_Global`."
+    )
 
     st.stop()
 
@@ -1034,16 +1371,26 @@ except Exception as error:
 if len(datos) < 12:
 
     st.error(
-        "Se necesitan al menos 12 observaciones."
+        "Se necesitan al menos 12 observaciones "
+        "para ejecutar todos los análisis, "
+        "incluido Ljung-Box con rezago 10."
     )
 
     st.stop()
 
 
+# --------------------------------------------------
+# AJUSTE DE LOS MODELOS
+# --------------------------------------------------
+
 modelo_simple, modelo_multiple = ajustar_modelos(
     datos
 )
 
+
+# --------------------------------------------------
+# NAVEGACIÓN POR LAS 13 SECCIONES
+# --------------------------------------------------
 
 with st.sidebar:
 
@@ -1066,10 +1413,14 @@ with st.sidebar:
             "10. Errores robustos Newey-West",
             "11. Regresión lineal múltiple",
             "12. Diagnóstico y comparación",
-            "13. Conclusiones generales"
+            "13. Conclusiones generales",
         ]
     )
 
+
+# --------------------------------------------------
+# EJECUCIÓN DE LA SECCIÓN SELECCIONADA
+# --------------------------------------------------
 
 if seccion.startswith("1."):
 
@@ -1115,7 +1466,8 @@ elif seccion.startswith("11."):
 
     mostrar_multiple(
         modelo_simple,
-        modelo_multiple
+        modelo_multiple,
+        datos
     )
 
 elif seccion.startswith("12."):
